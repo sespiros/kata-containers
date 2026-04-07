@@ -265,6 +265,10 @@ type Sandbox struct {
 	disableVMShutdown bool
 	isVCPUsPinningOn  bool
 
+	// cancelVM cancels s.ctx when the hypervisor exits, aborting
+	// pending agent connection attempts.
+	cancelVM context.CancelFunc
+
 	// hotplugNetworkConfigApplied prevents network config API being called
 	// multiple times for hot-plugged network device when Sandbox has multiple
 	// containers.
@@ -675,6 +679,13 @@ func newSandbox(ctx context.Context, sandboxConfig SandboxConfig, factory Factor
 		return nil, err
 	}
 
+	// Wrap the context so it can be cancelled when the hypervisor exits
+	// unexpectedly. This cancellation aborts pending agent connection
+	// attempts (vsock dial) that would otherwise block for the full
+	// dial timeout. Created here (before agent.init) so that k.ctx
+	// inherits the cancellation via k.ctx = sandbox.ctx.
+	vmCtx, vmCancel := context.WithCancel(ctx)
+
 	s := &Sandbox{
 		id:              sandboxConfig.ID,
 		factory:         factory,
@@ -689,11 +700,20 @@ func newSandbox(ctx context.Context, sandboxConfig SandboxConfig, factory Factor
 		shmSize:         sandboxConfig.ShmSize,
 		sharePidNs:      sandboxConfig.SharePidNs,
 		network:         network,
-		ctx:             ctx,
+		ctx:             vmCtx,
+		cancelVM:        vmCancel,
 		swapDeviceNum:   0,
 		swapSizeBytes:   0,
 		swapDevices:     []*config.BlockDrive{},
 	}
+
+	// Ensure vmCancel is called if sandbox creation fails, to avoid
+	// leaking the context goroutine.
+	defer func() {
+		if retErr != nil {
+			vmCancel()
+		}
+	}()
 
 	fsShare, err := NewFilesystemShare(s)
 	if err != nil {
@@ -1538,6 +1558,14 @@ func (s *Sandbox) startVM(ctx context.Context, prestartHookFunc func(context.Con
 				return err
 			}
 		}
+	}
+
+	// Wire up the VM exit callback BEFORE starting QEMU so that
+	// LogAndWait (which runs as soon as QEMU is launched) can call
+	// it even if QEMU crashes immediately. This avoids a race where
+	// QEMU exits before startVM wires up the callback.
+	if q, ok := s.hypervisor.(*qemu); ok && s.cancelVM != nil {
+		q.SetOnStop(s.cancelVM)
 	}
 
 	if err := s.network.Run(ctx, func() error {

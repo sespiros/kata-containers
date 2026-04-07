@@ -59,7 +59,7 @@ type AgentClient struct {
 	conn               *ttrpc.Client
 }
 
-type dialer func(string, time.Duration) (net.Conn, error)
+type dialer func(context.Context, string, time.Duration) (net.Conn, error)
 
 // NewAgentClient creates a new agent gRPC client and handles both unix and vsock addresses.
 //
@@ -83,7 +83,7 @@ func NewAgentClient(ctx context.Context, sock string, timeout uint32) (*AgentCli
 
 	var conn net.Conn
 	var d = agentDialer(parsedAddr)
-	conn, err = d(grpcAddr, dialTimeout)
+	conn, err = d(ctx, grpcAddr, dialTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -320,15 +320,13 @@ func parseGrpcHybridVSockAddr(sock string) (string, uint32, error) {
 // it is not reasonable to have such aggressive backoffs which would kill kata
 // containers boot up speed. For more information, see
 // https://github.com/grpc/grpc/blob/master/doc/connection-backoff.md
-func commonDialer(timeout time.Duration, dialFunc func() (net.Conn, error), timeoutErrMsg error) (net.Conn, error) {
+func commonDialer(ctx context.Context, timeout time.Duration, dialFunc func() (net.Conn, error), timeoutErrMsg error) (net.Conn, error) {
 	t := time.NewTimer(timeout)
-	cancel := make(chan bool)
 	ch := make(chan net.Conn)
 	go func() {
 		for {
 			select {
-			case <-cancel:
-				// canceled or channel closed
+			case <-ctx.Done():
 				return
 			default:
 			}
@@ -347,22 +345,20 @@ func commonDialer(timeout time.Duration, dialFunc func() (net.Conn, error), time
 		}
 	}()
 
-	var conn net.Conn
-	var ok bool
 	select {
-	case conn, ok = <-ch:
+	case conn, ok := <-ch:
 		if !ok {
 			return nil, timeoutErrMsg
 		}
+		return conn, nil
 	case <-t.C:
-		cancel <- true
 		return nil, timeoutErrMsg
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-
-	return conn, nil
 }
 
-func VsockDialer(sock string, timeout time.Duration) (net.Conn, error) {
+func VsockDialer(ctx context.Context, sock string, timeout time.Duration) (net.Conn, error) {
 	cid, port, err := parseGrpcVsockAddr(sock)
 	if err != nil {
 		return nil, err
@@ -374,11 +370,11 @@ func VsockDialer(sock string, timeout time.Duration) (net.Conn, error) {
 
 	timeoutErr := grpcStatus.Errorf(codes.DeadlineExceeded, "timed out connecting to vsock %d:%d", cid, port)
 
-	return commonDialer(timeout, dialFunc, timeoutErr)
+	return commonDialer(ctx, timeout, dialFunc, timeoutErr)
 }
 
 // HybridVSockDialer dials to a hybrid virtio socket
-func HybridVSockDialer(sock string, timeout time.Duration) (net.Conn, error) {
+func HybridVSockDialer(ctx context.Context, sock string, timeout time.Duration) (net.Conn, error) {
 	udsPath, port, err := parseGrpcHybridVSockAddr(sock)
 	if err != nil {
 		return nil, err
@@ -449,11 +445,11 @@ func HybridVSockDialer(sock string, timeout time.Duration) (net.Conn, error) {
 	}
 
 	timeoutErr := grpcStatus.Errorf(codes.DeadlineExceeded, "timed out connecting to hybrid vsocket %s", sock)
-	return commonDialer(timeout, dialFunc, timeoutErr)
+	return commonDialer(ctx, timeout, dialFunc, timeoutErr)
 }
 
 // RemoteSockDialer dials to an agent in a remote hypervisor sandbox
-func RemoteSockDialer(sock string, timeout time.Duration) (net.Conn, error) {
+func RemoteSockDialer(ctx context.Context, sock string, timeout time.Duration) (net.Conn, error) {
 
 	s := strings.Split(sock, ":")
 	if len(s) != 2 || s[0] != RemoteSockScheme {
@@ -474,11 +470,11 @@ func RemoteSockDialer(sock string, timeout time.Duration) (net.Conn, error) {
 
 	timeoutErr := grpcStatus.Errorf(codes.DeadlineExceeded, "timed out connecting to remote sock: %s", socketPath)
 
-	return commonDialer(timeout, dialFunc, timeoutErr)
+	return commonDialer(ctx, timeout, dialFunc, timeoutErr)
 }
 
 // just for tests use.
-func MockHybridVSockDialer(sock string, timeout time.Duration) (net.Conn, error) {
+func MockHybridVSockDialer(ctx context.Context, sock string, timeout time.Duration) (net.Conn, error) {
 	sock = strings.TrimPrefix(sock, "mock:")
 
 	dialFunc := func() (net.Conn, error) {
@@ -486,5 +482,5 @@ func MockHybridVSockDialer(sock string, timeout time.Duration) (net.Conn, error)
 	}
 
 	timeoutErr := grpcStatus.Errorf(codes.DeadlineExceeded, "timed out connecting to mock hybrid vsocket %s", sock)
-	return commonDialer(timeout, dialFunc, timeoutErr)
+	return commonDialer(ctx, timeout, dialFunc, timeoutErr)
 }

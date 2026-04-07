@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"context"
 	"net/http"
 	"net/url"
 	"os"
@@ -189,7 +190,7 @@ func getConn(sandboxID string, port uint64) (net.Conn, error) {
 			return nil, fmt.Errorf("Invalid vsock scheme: %s", sock)
 		}
 		shimAddr := fmt.Sprintf("%s:%s:%d", clientUtils.VSockSocketScheme, cidAndPort[0], port)
-		return clientUtils.VsockDialer(shimAddr, defaultTimeout)
+		return clientUtils.VsockDialer(context.Background(), shimAddr, defaultTimeout)
 
 	case clientUtils.HybridVSockScheme:
 		// addr: hvsock:///run/vc/firecracker/340b412c97bf1375cdda56bfa8f18c8a/root/kata.hvsock:1024
@@ -200,7 +201,7 @@ func getConn(sandboxID string, port uint64) (net.Conn, error) {
 
 		// hvsock:///run/vc/firecracker/340b412c97bf1375cdda56bfa8f18c8a/root/kata.hvsock
 		shimAddr := fmt.Sprintf("%s:%s:%d", clientUtils.HybridVSockScheme, hvsocket[0], port)
-		return clientUtils.HybridVSockDialer(shimAddr, defaultTimeout)
+		return clientUtils.HybridVSockDialer(context.Background(), shimAddr, defaultTimeout)
 	}
 
 	return nil, fmt.Errorf("schema %s not found", addr.Scheme)

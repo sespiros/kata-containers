@@ -118,6 +118,12 @@ type qemu struct {
 
 	stopped int32
 
+	// stopOnce ensures markStopped is called exactly once.
+	stopOnce sync.Once
+	// onStop is called when the hypervisor exits to cancel pending
+	// operations. Protected by mu, set via SetOnStop.
+	onStop func()
+
 	mu sync.Mutex
 }
 
@@ -1114,7 +1120,34 @@ func (q *qemu) LogAndWait(qemuCmd *exec.Cmd, reader io.ReadCloser) {
 	if err := qemuCmd.Wait(); err != nil {
 		q.Logger().WithField("qemuPid", pid).WithField("error", err).Warn("QEMU exited with an error")
 	}
+	q.markStopped("QEMU process exited")
 }
+
+// markStopped atomically sets q.stopped and calls the onStop callback
+// to cancel pending operations. Safe to call multiple times — only the
+// first call takes effect.
+func (q *qemu) markStopped(reason string) {
+	q.stopOnce.Do(func() {
+		atomic.StoreInt32(&q.stopped, 1)
+		q.Logger().WithField("reason", reason).Info("hypervisor marked as stopped")
+		q.mu.Lock()
+		onStop := q.onStop
+		q.mu.Unlock()
+		if onStop != nil {
+			onStop()
+		}
+	})
+}
+
+// SetOnStop registers a callback that is invoked when the hypervisor
+// exits unexpectedly. The callback is called at most once.
+// Must be called before StartVM to avoid races with LogAndWait.
+func (q *qemu) SetOnStop(fn func()) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.onStop = fn
+}
+
 
 // StartVM will start the Sandbox's VM.
 func (q *qemu) StartVM(ctx context.Context, timeout int) error {
@@ -1461,20 +1494,23 @@ func (q *qemu) loopQMPEvent(event chan govmmQemu.QMPEvent) {
 	for e := range event {
 		q.Logger().WithField("event", e).Debug("got QMP event")
 		if e.Name == "GUEST_PANICKED" {
-			go q.handleGuestPanic()
+			go q.handleGuestPanic(e)
 		}
 	}
 	q.Logger().Infof("QMP event channel closed")
 }
 
-func (q *qemu) handleGuestPanic() {
+func (q *qemu) handleGuestPanic(event govmmQemu.QMPEvent) {
+	q.Logger().WithField("event", event).Error("guest panic event received")
+
+	// Mark the hypervisor as stopped immediately so that pending
+	// operations (agent dial, monitor Check) abort promptly.
+	// This implements the TODO from https://github.com/kata-containers/kata-containers/issues/1026.
+	q.markStopped("guest panic event")
+
 	if err := q.dumpGuestMemory(q.config.GuestMemoryDumpPath); err != nil {
 		q.Logger().WithError(err).Error("failed to dump guest memory")
 	}
-
-	// TODO: how to notify the upper level sandbox to handle the error
-	// to do a fast fail(shutdown or others).
-	// tracked by https://github.com/kata-containers/kata-containers/issues/1026
 }
 
 // canDumpGuestMemory check if can do a guest memory dump operation.
