@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	sysexec "os/exec"
+	"os/signal"
 	goruntime "runtime"
 	"sync"
 	"syscall"
@@ -103,12 +104,54 @@ func New(ctx context.Context, id string, publisher cdshim.Publisher, shutdown fu
 		namespace:  ns,
 	}
 
+	go s.handleSignalShutdown()
 	go s.processExits()
 
 	forwarder := s.newEventsForwarder(ctx, publisher)
 	go forwarder.forward()
 
 	return s, nil
+}
+
+// handleSignalShutdown handles SIGTERM/SIGINT by persisting Stopped state
+// via Sandbox.MarkStopped and then exiting.
+//
+// This is the shim's exit path when containerd's CRI tears down the pod
+// sandbox: instead of issuing TaskService.Shutdown to the shim, the CRI
+// stops the sandbox's systemd cgroup scope, which sends SIGTERM here.
+//
+// After the shim exits, containerd's task plugin reacts to the ttrpc
+// disconnect by re-running the shim binary with -action delete to clean up
+// the bundle. With Stopped already on disk, that delete invocation skips
+// the agent RPCs that would otherwise hang against the dead VM and
+// completes quickly enough to remove the bundle before containerd's 5s
+// per-shim cleanup deadline fires.
+//
+// See kata-containers/kata-containers#11328.
+func (s *service) handleSignalShutdown() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	sig := <-sigCh
+
+	shimLog.WithField("signal", sig).Info("received termination signal, performing clean shutdown")
+
+	if s.cancel != nil {
+		s.cancel()
+	}
+
+	// VCSandbox does not expose MarkStopped; type-assert to the concrete
+	// type that the production implementation uses.
+	if sb, ok := s.sandbox.(*vc.Sandbox); ok {
+		if err := sb.MarkStopped(); err != nil {
+			shimLog.WithError(err).Warn("MarkStopped failed during signal-driven shutdown")
+		}
+	}
+
+	if s.hpid > 0 {
+		_ = syscall.Kill(int(s.hpid), syscall.SIGKILL)
+	}
+
+	os.Exit(0)
 }
 
 type exit struct {

@@ -2147,6 +2147,35 @@ func (s *Sandbox) setSandboxState(state types.StateString) error {
 	return nil
 }
 
+// MarkStopped sets the state of the sandbox and every container it knows
+// about to Stopped and persists it to disk, without communicating with the
+// agent or the hypervisor.
+func (s *Sandbox) MarkStopped() error {
+	if err := s.setSandboxState(types.StateStopped); err != nil {
+		return err
+	}
+	for _, c := range s.containers {
+		c.state.State = types.StateStopped
+	}
+
+	// Also persist Stopped state for containers that remain in the saved
+	// config but no longer in s.containers. CRI's per-container Delete
+	// removes them from s.containers before SIGTERM arrives here, but the
+	// config entry sticks around. Without this, the later cleanup
+	// invocation rebuilds Container objects from the saved config with
+	// default state and tries to call the agent for them.
+	for _, contConfig := range s.config.Containers {
+		if _, ok := s.containers[contConfig.ID]; ok {
+			continue
+		}
+		s.containers[contConfig.ID] = &Container{
+			id:    contConfig.ID,
+			state: types.ContainerState{State: types.StateStopped},
+		}
+	}
+	return s.Save()
+}
+
 const maxBlockIndex = 65535
 
 // getAndSetSandboxBlockIndex retrieves an unused sandbox block index from
