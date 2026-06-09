@@ -355,7 +355,9 @@ func commonDialer(timeout time.Duration, dialFunc func() (net.Conn, error), time
 			return nil, timeoutErrMsg
 		}
 	case <-t.C:
-		cancel <- true
+		// close instead of send: an unbuffered send would stall waiting for
+		// the dial goroutine, which can take up to ~10s in HybridVSockDialer.
+		close(cancel)
 		return nil, timeoutErrMsg
 	}
 

@@ -7,6 +7,8 @@ package virtcontainers
 
 import (
 	"context"
+	"errors"
+	"os"
 	"runtime"
 
 	deviceApi "github.com/kata-containers/kata-containers/src/runtime/pkg/device/api"
@@ -137,6 +139,12 @@ func CleanupContainer(ctx context.Context, sandboxID, containerID string, force 
 
 	s, err := fetchSandbox(ctx, sandboxID)
 	if err != nil {
+		// If the sandbox's persist data is already gone (a clean shim
+		// teardown removes it via sandbox.Delete), there is nothing more
+		// to do here. The caller still gets to run filesystem cleanup.
+		if force && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
 	defer s.Release(ctx)

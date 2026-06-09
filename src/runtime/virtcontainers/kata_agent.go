@@ -2403,8 +2403,25 @@ func (k *kataAgent) connect(ctx context.Context) error {
 		return nil
 	}
 
+	// Bail early on a done caller context, and cap the dial timeout at the
+	// remaining deadline. Do NOT set k.dead here: an expired caller context
+	// says nothing about whether the guest agent is alive.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dialTimout := k.dialTimout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			s := uint32((remaining + time.Second - 1) / time.Second)
+			if dialTimout == 0 || s < dialTimout {
+				dialTimout = s
+			}
+		}
+	}
+
 	k.Logger().WithField("url", k.state.URL).Info("New client")
-	client, err := kataclient.NewAgentClient(k.ctx, k.state.URL, k.dialTimout)
+	client, err := kataclient.NewAgentClient(ctx, k.state.URL, dialTimout)
 	if err != nil {
 		k.dead = true
 		return err

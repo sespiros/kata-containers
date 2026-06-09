@@ -31,11 +31,24 @@ func cReap(s *service, status int, id, execid string, exitat time.Time) {
 	}
 }
 
+// cleanupBinaryTimeout fits agent work inside containerd's 5s per-shim
+// cleanup deadline.
+const cleanupBinaryTimeout = 3 * time.Second
+
+// deleteAgentTimeout caps Delete RPCs so a dead agent doesn't keep the
+// shim alive past containerd's deadline.
+const deleteAgentTimeout = 30 * time.Second
+
 func cleanupContainer(ctx context.Context, sandboxID, cid, bundlePath string) error {
 	shimLog.WithField("service", "cleanup").WithField("container", cid).Info("Cleanup container")
 
-	err := vci.CleanupContainer(ctx, sandboxID, cid, true)
-	if err != nil {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cleanupBinaryTimeout)
+		defer cancel()
+	}
+
+	if err := vci.CleanupContainer(ctx, sandboxID, cid, true); err != nil {
 		shimLog.WithError(err).WithField("container", cid).Warn("failed to cleanup container")
 		return err
 	}

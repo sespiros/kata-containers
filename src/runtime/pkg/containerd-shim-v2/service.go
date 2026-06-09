@@ -518,7 +518,12 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (_ *taskAP
 func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (_ *taskAPI.DeleteResponse, err error) {
 	shimLog.WithField("container", r.ID).Debug("Delete() start")
 	defer shimLog.WithField("container", r.ID).Debug("Delete() end")
-	span, spanCtx := katatrace.Trace(s.rootCtx, shimLog, "Delete", shimTracingTags)
+	span, spanCtx := katatrace.Trace(ctx, shimLog, "Delete", shimTracingTags)
+	if _, hasDeadline := spanCtx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		spanCtx, cancel = context.WithTimeout(spanCtx, deleteAgentTimeout)
+		defer cancel()
+	}
 	defer span.End()
 
 	start := time.Now()
